@@ -6,6 +6,7 @@
 package ginraymond
 
 import (
+	"fmt"
 	"net/http"
 	"path"
 
@@ -16,10 +17,11 @@ import (
 
 // RaymondRender is a custom Gin template renderer using Raymond.
 type RaymondRender struct {
-	Options  *RenderOptions
-	Cache    *TemplateCache
-	Template *raymond.Template
-	Context  interface{}
+	Options        *RenderOptions
+	Cache          *TemplateCache
+	Template       *raymond.Template
+	LayoutTemplate *raymond.Template
+	Context        interface{}
 }
 
 // New creates a new RaymondRender instance with custom Options.
@@ -41,6 +43,18 @@ func Default() *RaymondRender {
 // This means that we have to panic on any errors which is not ideal in Go.
 func (r RaymondRender) Instance(name string, data interface{}) render.Render {
 	var template *raymond.Template
+	var layoutTemplate *raymond.Template
+
+	if len(r.Options.Layout) > 0 {
+		layoutFilename := path.Join(r.Options.TemplateDir, r.Options.Layout)
+		// always read template files from disk if in debug mode, use cache otherwise.
+		if gin.Mode() == "debug" {
+			layoutTemplate = MustLoadTemplate(layoutFilename)
+		} else {
+			layoutTemplate = r.Cache.MustGet(layoutFilename)
+		}
+	}
+
 	filename := path.Join(r.Options.TemplateDir, name)
 
 	// always read template files from disk if in debug mode, use cache otherwise.
@@ -51,9 +65,10 @@ func (r RaymondRender) Instance(name string, data interface{}) render.Render {
 	}
 
 	return RaymondRender{
-		Template: template,
-		Context:  data,
-		Options:  r.Options,
+		Template:       template,
+		LayoutTemplate: layoutTemplate,
+		Context:        data,
+		Options:        r.Options,
 	}
 }
 
@@ -64,8 +79,21 @@ func (r RaymondRender) Render(w http.ResponseWriter) error {
 	if val := header["Content-Type"]; len(val) == 0 {
 		header["Content-Type"] = []string{r.Options.ContentType}
 	}
-
-	output, err := r.Template.Exec(r.Context)
+	binding := r.Context
+	output, err := r.Template.Exec(binding)
+	if r.LayoutTemplate != nil {
+		var context gin.H
+		if m, is := binding.(gin.H); is { //handlebars accepts maps,
+			context = m
+		} else {
+			return fmt.Errorf("Invalid render request")
+		}
+		context["yield"] = raymond.SafeString(output)
+		output, err = r.LayoutTemplate.Exec(context)
+		if err != nil {
+			return err
+		}
+	}
 	w.Write([]byte(output))
 	return err
 }
